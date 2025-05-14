@@ -34,27 +34,27 @@ type TaskRunner interface {
 
 // Task wraps a TaskSpec and implements TaskRunner.
 type Task struct {
-	spec TaskSpec
+	Spec TaskSpec
 }
 
 // NewTask creates a new Task from a TaskSpec.
 func NewTask(spec TaskSpec) *Task {
-	return &Task{spec: spec}
+	return &Task{Spec: spec}
 }
 
 // Run executes the task's Run function.
 func (t *Task) Run(ctx context.Context) (interface{}, error) {
-	return t.spec.Run(ctx)
+	return t.Spec.Run(ctx)
 }
 
 // GetName returns the task's name.
 func (t *Task) GetName() string {
-	return t.spec.Name
+	return t.Spec.Name
 }
 
 // GetDependencies returns the task's dependencies.
 func (t *Task) GetDependencies() []string {
-	return t.spec.Depends
+	return t.Spec.Depends
 }
 
 // Validate ensures the TaskSpec is valid.

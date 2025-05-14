@@ -16,6 +16,7 @@ func main() {
 	timeout := flag.Duration("timeout", 10*time.Second, "task execution timeout")
 	concurrency := flag.Int("concurrency", runtime.NumCPU(), "number of concurrent tasks")
 	verbose := flag.Bool("verbose", false, "enable verbose logging")
+	listTasks := flag.Bool("list", false, "list tasks and their dependencies")
 	flag.Parse()
 
 	// Set up logging
@@ -25,53 +26,58 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	// Clear any existing tasks and register new ones
+	// Clear any existing tasks
 	task.ClearRegistry()
-	if err := task.RegisterTasks([]task.TaskSpec{
-		{
-			Name: "hello_task",
-			Run: func(ctx context.Context) (interface{}, error) {
-				time.Sleep(100 * time.Millisecond)
-				return "Hello from GoQuest!", nil
-			},
-			Depends: []string{},
-		},
-		{
-			Name: "delayed_task",
-			Run: func(ctx context.Context) (interface{}, error) {
-				time.Sleep(500 * time.Millisecond)
-				return "This task took longer to complete", nil
-			},
-			Depends: []string{"hello_task"},
-		},
-		{
-			Name: "error_task",
-			Run: func(ctx context.Context) (interface{}, error) {
-				time.Sleep(200 * time.Millisecond)
-				return nil, util.NewError("this task always fails")
-			},
-			Depends: []string{},
-		},
-	}); err != nil {
-		util.ExitWithError(util.WrapError(err, "failed to register tasks"))
-	}
 
-	// Load and execute tasks
+	// Load tasks from script
 	util.LogInfo("Loading script: %s", *scriptPath)
 	tasks := task.GetAllTasks()
 	if len(tasks) == 0 {
 		util.ExitWithError(util.NewError("no tasks registered"))
 	}
 
-	// Convert []*Task to []TaskRunner
-	taskRunners := make([]task.TaskRunner, len(tasks))
-	for i, t := range tasks {
-		taskRunners[i] = t
+	// Create task graph
+	graph := task.NewTaskGraph()
+	for _, t := range tasks {
+		if err := graph.AddTask(t.Spec); err != nil {
+			util.ExitWithError(util.WrapError(err, "failed to add task to graph"))
+		}
 	}
 
+	// Create executor and scheduler
+	executor := task.NewExecutor(nil, *concurrency)
+	scheduler := task.NewScheduler(graph, executor)
+
+	// List tasks if requested
+	if *listTasks {
+		if err := graph.Validate(); err != nil {
+			util.ExitWithError(util.WrapError(err, "invalid task dependencies"))
+		}
+
+		// Get execution order
+		order, err := scheduler.GetExecutionOrder()
+		if err != nil {
+			util.ExitWithError(util.WrapError(err, "failed to get execution order"))
+		}
+
+		// Print tasks and their dependencies
+		for _, name := range order {
+			deps := graph.GetDependencies(name)
+			if len(deps) == 0 {
+				util.LogInfo("Task: %s, Depends: []", name)
+			} else {
+				util.LogInfo("Task: %s, Depends: %v", name, deps)
+			}
+		}
+		return
+	}
+
+	// Execute tasks
 	util.LogInfo("Running %d tasks with concurrency %d", len(tasks), *concurrency)
-	executor := task.NewExecutor(taskRunners, *concurrency)
-	results := executor.Run(ctx)
+	results, err := scheduler.Schedule(ctx)
+	if err != nil {
+		util.ExitWithError(util.WrapError(err, "failed to schedule tasks"))
+	}
 
 	// Print results
 	for _, result := range results {
