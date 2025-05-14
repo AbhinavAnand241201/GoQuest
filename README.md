@@ -3,7 +3,7 @@
 ## Overview
 **GoQuest** is a standalone Go CLI tool and library that orchestrates concurrent task workflows defined in a simple Go-based script. It allows users to define tasks (e.g., HTTP requests, computations) and execute them in parallel with a configurable worker pool, leveraging Go's concurrency model (goroutines and channels). Designed as a lightweight alternative to tools like `make` or Apache Airflow, GoQuest is ideal for developers automating workflows, showcasing advanced Go features like concurrency, interfaces, and robust error handling.
 
-This project was built by **Abhinav Anand**, a third-year Computer Science student at NIT Durgapur, to demonstrate proficiency in Go for backend and DevOps roles. The codebase emphasizes clean code, modularity, and testability, making it a standout portfolio piece for recruiters.
+This project is built by  me , **Abhinav Anand**, a third-year student at NIT Durgapur, to demonstrate proficiency in Go for backend and DevOps roles. The codebase emphasizes clean code, modularity, and testability, making it a standout portfolio piece for recruiters.
 
 ## Features
 - **Concurrent Task Execution**: Runs multiple tasks in parallel using a worker pool with configurable concurrency.
