@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -16,29 +17,78 @@ type TaskResult struct {
 	Status   string // "success", "failed", "cancelled"
 }
 
-// Executor manages concurrent task execution.
+// Executor manages the execution of tasks
 type Executor struct {
-	tasks       []TaskRunner
+	// Channel for task results
+	results chan TaskResult
+	// Channel for task errors
+	errors chan error
+	// Wait group for task completion
+	wg sync.WaitGroup
+	// Mutex for concurrent access
+	mu sync.RWMutex
+	// Map of task name to execution status
+	status map[string]TaskStatus
+	// List of tasks to execute
+	tasks []Task
+	// Number of concurrent workers
 	concurrency int
+	// Mutex for results
 	resultMutex sync.Mutex
-	results     []TaskResult
+	// List of results
+	resultList []TaskResult
 }
 
-// NewExecutor creates a new Executor with the given tasks and concurrency level.
-func NewExecutor(tasks []TaskRunner, concurrency int) *Executor {
-	if concurrency < 1 {
-		concurrency = 1
-	}
+// NewExecutor creates a new executor
+func NewExecutor() *Executor {
 	return &Executor{
-		tasks:       tasks,
-		concurrency: concurrency,
-		results:     make([]TaskResult, 0, len(tasks)),
+		results:     make(chan TaskResult),
+		errors:      make(chan error),
+		status:      make(map[string]TaskStatus),
+		tasks:       make([]Task, 0),
+		concurrency: runtime.NumCPU(),
+		resultList:  make([]TaskResult, 0),
 	}
+}
+
+// ExecuteTask executes a task and returns its result
+func (e *Executor) ExecuteTask(ctx context.Context, task Task) (TaskResult, error) {
+	// Record start time
+	start := time.Now()
+
+	// Execute task
+	result, err := task.Run(ctx)
+	duration := time.Since(start)
+
+	// Record completion
+	e.mu.Lock()
+	e.status[task.Name()] = TaskStatus{
+		Started:   start,
+		Completed: time.Now(),
+		Duration:  duration,
+		Error:     err,
+		Result:    result.Result,
+	}
+	e.mu.Unlock()
+
+	if err != nil {
+		return TaskResult{}, fmt.Errorf("task %s failed: %w", task.Name(), err)
+	}
+
+	return result, nil
+}
+
+// GetTaskStatus returns the execution status of a task
+func (e *Executor) GetTaskStatus(taskName string) (TaskStatus, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	status, exists := e.status[taskName]
+	return status, exists
 }
 
 // Run executes all tasks concurrently and returns their results.
 func (e *Executor) Run(ctx context.Context) []TaskResult {
-	taskCh := make(chan TaskRunner, len(e.tasks))
+	taskCh := make(chan Task, len(e.tasks))
 	resultCh := make(chan TaskResult, len(e.tasks))
 	var wg sync.WaitGroup
 
@@ -48,24 +98,11 @@ func (e *Executor) Run(ctx context.Context) []TaskResult {
 		go func() {
 			defer wg.Done()
 			for task := range taskCh {
-				start := time.Now()
 				result, err := task.Run(ctx)
-				duration := time.Since(start)
-
-				status := "success"
 				if err != nil {
-					status = "failed"
-				} else if ctx.Err() != nil {
-					status = "cancelled"
+					result.Error = err
 				}
-
-				resultCh <- TaskResult{
-					Name:     task.GetName(),
-					Result:   result,
-					Error:    err,
-					Duration: duration,
-					Status:   status,
-				}
+				resultCh <- result
 			}
 		}()
 	}
@@ -85,11 +122,11 @@ func (e *Executor) Run(ctx context.Context) []TaskResult {
 	// Process results
 	for result := range resultCh {
 		e.resultMutex.Lock()
-		e.results = append(e.results, result)
+		e.resultList = append(e.resultList, result)
 		e.resultMutex.Unlock()
 	}
 
-	return e.results
+	return e.resultList
 }
 
 // AggregateErrors combines task errors into a single error.

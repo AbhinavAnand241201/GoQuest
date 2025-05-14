@@ -3,44 +3,57 @@ package main
 import (
 	"context"
 	"flag"
-	"runtime"
+	"fmt"
+	"os"
 	"time"
 
-	"github.com/AbhinavAnand241201/goquest/internal/util"
+	"github.com/AbhinavAnand241201/goquest/pkg/log"
+	"github.com/AbhinavAnand241201/goquest/pkg/output"
 	"github.com/AbhinavAnand241201/goquest/pkg/task"
 )
 
 func main() {
 	// Parse command line flags
-	scriptPath := flag.String("script", "scripts/example.go", "path to the task script")
-	timeout := flag.Duration("timeout", 10*time.Second, "task execution timeout")
-	concurrency := flag.Int("concurrency", runtime.NumCPU(), "number of concurrent tasks")
-	verbose := flag.Bool("verbose", false, "enable verbose logging")
-	listTasks := flag.Bool("list", false, "list tasks and their dependencies")
+	scriptFile := flag.String("script", "", "Path to the Go script containing task definitions")
+	concurrency := flag.Int("concurrency", 4, "Maximum number of concurrent tasks")
+	jsonOutput := flag.Bool("json", false, "Output results in JSON format")
 	flag.Parse()
 
-	// Set up logging
-	util.SetVerbose(*verbose)
+	// Initialize logger
+	logger := log.NewLogger(*jsonOutput)
 
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// Validate script file
+	if *scriptFile == "" {
+		logger.Error("No script file specified", nil)
+		os.Exit(1)
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	// Clear any existing tasks
-	task.ClearRegistry()
-
-	// Load tasks from script
-	util.LogInfo("Loading script: %s", *scriptPath)
-	tasks := task.GetAllTasks()
-	if len(tasks) == 0 {
-		util.ExitWithError(util.NewError("no tasks registered"))
+	// Parse script
+	parser := task.NewParser()
+	tasks, err := parser.ParseScript(*scriptFile)
+	if err != nil {
+		if *jsonOutput {
+			output.PrintError(err)
+		} else {
+			logger.Error("Failed to parse script", map[string]interface{}{"error": err})
+		}
+		os.Exit(1)
 	}
 
 	// Create task graph
 	graph := task.NewTaskGraph()
-	for _, t := range tasks {
-		if err := graph.AddTask(t.Spec); err != nil {
-			util.ExitWithError(util.WrapError(err, "failed to add task to graph"))
+	for _, task := range tasks {
+		if err := graph.AddTask(task); err != nil {
+			if *jsonOutput {
+				output.PrintError(err)
+			} else {
+				logger.Error("Failed to add task to graph", map[string]interface{}{"error": err})
+			}
+			os.Exit(1)
 		}
 	}
 
@@ -48,55 +61,63 @@ func main() {
 	executor := task.NewExecutor(nil, *concurrency)
 	scheduler := task.NewScheduler(graph, executor)
 
-	// List tasks if requested
-	if *listTasks {
-		if err := graph.Validate(); err != nil {
-			util.ExitWithError(util.WrapError(err, "invalid task dependencies"))
-		}
-
-		// Get execution order
-		order, err := scheduler.GetExecutionOrder()
-		if err != nil {
-			util.ExitWithError(util.WrapError(err, "failed to get execution order"))
-		}
-
-		// Print tasks and their dependencies
-		for _, name := range order {
-			deps := graph.GetDependencies(name)
-			if len(deps) == 0 {
-				util.LogInfo("Task: %s, Depends: []", name)
-			} else {
-				util.LogInfo("Task: %s, Depends: %v", name, deps)
-			}
-		}
-		return
+	// Log start of execution
+	if !*jsonOutput {
+		logger.Info("Running tasks", map[string]interface{}{
+			"script":      *scriptFile,
+			"concurrency": *concurrency,
+			"taskCount":   len(tasks),
+		})
 	}
 
-	// Execute tasks
-	util.LogInfo("Running %d tasks with concurrency %d", len(tasks), *concurrency)
+	// Schedule and run tasks
 	results, err := scheduler.Schedule(ctx)
 	if err != nil {
-		util.ExitWithError(util.WrapError(err, "failed to schedule tasks"))
+		if *jsonOutput {
+			output.PrintError(err)
+		} else {
+			logger.Error("Failed to schedule tasks", map[string]interface{}{"error": err})
+		}
+		os.Exit(1)
 	}
 
 	// Print results
-	for _, result := range results {
-		if result.Error != nil {
-			util.LogInfo("Task %s: %s, error: %v, duration: %v",
-				result.Name, result.Status, result.Error, result.Duration)
-		} else {
-			util.LogInfo("Task %s: %s, result: %v, duration: %v",
-				result.Name, result.Status, result.Result, result.Duration)
+	if *jsonOutput {
+		if err := output.PrintTaskResults(results); err != nil {
+			output.PrintError(err)
+			os.Exit(1)
 		}
-	}
+	} else {
+		// Print human-readable results
+		for _, result := range results {
+			fields := map[string]interface{}{
+				"status":   result.Status,
+				"duration": result.Duration,
+			}
+			if result.Error != nil {
+				fields["error"] = result.Error
+			} else {
+				fields["result"] = result.Result
+			}
+			logger.Info(fmt.Sprintf("Task %s completed", result.Name), fields)
+		}
 
-	// Print summary
-	failed := executor.GetFailedTasks(results)
-	successful := executor.GetSuccessfulTasks(results)
-	util.LogInfo("%d tasks completed, %d failed", len(successful), len(failed))
+		// Print summary
+		failed := executor.GetFailedTasks(results)
+		successful := executor.GetSuccessfulTasks(results)
+		logger.Info("Execution summary", map[string]interface{}{
+			"successful": len(successful),
+			"failed":     len(failed),
+		})
+	}
 
 	// Exit with error if any tasks failed
 	if err := executor.AggregateErrors(results); err != nil {
-		util.ExitWithError(err)
+		if *jsonOutput {
+			output.PrintError(err)
+		} else {
+			logger.Error("Task execution failed", map[string]interface{}{"error": err})
+		}
+		os.Exit(1)
 	}
 }

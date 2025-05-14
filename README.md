@@ -12,6 +12,7 @@ This project is built by  me , **Abhinav Anand**, a third-year student at NIT Du
 - **Robust Error Handling**: Aggregates task errors and provides detailed, contextual error messages.
 - **Thread-Safe Logging**: Outputs timestamped logs (INFO, DEBUG) with thread-safe operations for concurrent execution.
 - **Extensible Design**: Uses interfaces (`TaskRunner`) for pluggable task types, preparing for future enhancements like HTTP or file tasks.
+- **JSON Output**: Export task results as JSON for machine-readable results.
 
 ## Project Status
 As of completion of Part 2 (of a 5-part development plan), GoQuest supports:

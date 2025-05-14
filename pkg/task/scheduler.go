@@ -3,190 +3,250 @@ package task
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
+	"time"
+
+	"github.com/AbhinavAnand241201/goquest/pkg/log"
 )
 
-// Scheduler manages the execution of tasks based on their dependencies.
+// SchedulerMetrics tracks performance metrics for the scheduler
+type SchedulerMetrics struct {
+	mu sync.RWMutex
+	// Task execution metrics
+	TasksStarted   int64
+	TasksCompleted int64
+	TasksFailed    int64
+	TotalDuration  time.Duration
+	// Worker pool metrics
+	ActiveWorkers     int
+	MaxWorkers        int
+	WorkerUtilization float64
+	// Memory metrics
+	AllocBytes      uint64
+	TotalAllocBytes uint64
+	NumGC           uint32
+}
+
+// Scheduler manages the execution of tasks based on their dependencies
 type Scheduler struct {
-	graph    *TaskGraph
-	executor *Executor
+	graph      *TaskGraph
+	executor   *Executor
+	logger     *log.Logger
+	minWorkers int
+	maxWorkers int
+	workerPool chan struct{}
+	metrics    *SchedulerMetrics
+	// Channel for task results
+	results chan TaskResult
+	// Channel for task errors
+	errors chan error
+	// Wait group for task completion
+	wg sync.WaitGroup
+	// Mutex for concurrent access
+	mu sync.RWMutex
+	// Map of task name to execution status
+	status map[string]TaskStatus
+	// Channel for task completion notifications
+	done chan string
+	// Channel for task start notifications
+	started chan string
+	// Channel for task error notifications
+	failed chan string
+	// Channel for task cancellation
+	cancel chan struct{}
+	// Context for cancellation
+	ctx context.Context
+	// Cancel function for context
+	cancelFunc context.CancelFunc
 }
 
-// NewScheduler creates a new Scheduler with the given graph and executor.
-func NewScheduler(graph *TaskGraph, executor *Executor) *Scheduler {
+// TaskResult represents the result of a task execution
+type TaskResult struct {
+	TaskName string
+	Result   string
+	Duration time.Duration
+}
+
+// TaskStatus represents the execution status of a task
+type TaskStatus struct {
+	Started   time.Time
+	Completed time.Time
+	Duration  time.Duration
+	Error     error
+	Result    string
+}
+
+// NewScheduler creates a new scheduler for the given task graph
+func NewScheduler(graph *TaskGraph, executor *Executor, logger *log.Logger) *Scheduler {
+	minWorkers := runtime.NumCPU()
+	maxWorkers := minWorkers * 4 // Allow up to 4x CPU cores
+
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		graph:    graph,
-		executor: executor,
+		graph:      graph,
+		executor:   executor,
+		logger:     logger,
+		minWorkers: minWorkers,
+		maxWorkers: maxWorkers,
+		workerPool: make(chan struct{}, maxWorkers),
+		metrics:    &SchedulerMetrics{},
+		results:    make(chan TaskResult),
+		errors:     make(chan error),
+		status:     make(map[string]TaskStatus),
+		done:       make(chan string),
+		started:    make(chan string),
+		failed:     make(chan string),
+		cancel:     make(chan struct{}),
+		ctx:        ctx,
+		cancelFunc: cancel,
 	}
 }
 
-// Schedule executes tasks in topological order while respecting dependencies.
-func (s *Scheduler) Schedule(ctx context.Context) ([]TaskResult, error) {
-	// Validate the graph first
+// Start begins executing tasks in the graph
+func (s *Scheduler) Start() error {
+	// Validate the graph
 	if err := s.graph.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid task graph: %w", err)
+		return fmt.Errorf("invalid task graph: %w", err)
 	}
 
-	// Calculate in-degree for each task
-	inDegree := make(map[string]int)
-	for _, taskName := range s.graph.GetAllTasks() {
-		deps := s.graph.GetDependencies(taskName)
-		inDegree[taskName] = len(deps)
+	// Start monitoring goroutine
+	go s.monitor()
+
+	// Get initial runnable tasks
+	runnable := s.graph.GetRunnableTasks()
+	if len(runnable) == 0 {
+		return fmt.Errorf("no runnable tasks found")
 	}
 
-	// Initialize queue with tasks that have no dependencies
-	queue := make([]string, 0)
-	for taskName, degree := range inDegree {
-		if degree == 0 {
-			queue = append(queue, taskName)
-		}
+	// Start executing tasks
+	for _, task := range runnable {
+		s.wg.Add(1)
+		go s.executeTask(task)
 	}
 
-	var results []TaskResult
-	var mu sync.Mutex        // Protect results slice from concurrent writes
-	var failedTasks []string // Track failed tasks for better error reporting
+	// Wait for all tasks to complete
+	s.wg.Wait()
 
-	// Process tasks in batches
-	processed := make(map[string]bool)
-	for len(queue) > 0 {
-		// Debug: print current queue
-		// fmt.Printf("Scheduler queue: %v\n", queue)
-		// Get current batch of tasks
-		batch := make([]TaskRunner, 0, len(queue))
-		for _, taskName := range queue {
-			if spec, exists := s.graph.GetTaskSpec(taskName); exists {
-				batch = append(batch, NewTask(spec))
-			}
-		}
-		queue = queue[:0] // Clear queue for next batch
-
-		// Create a new executor for this batch
-		batchExecutor := NewExecutor(batch, s.executor.concurrency)
-
-		// If context is already cancelled, mark all tasks in batch as cancelled
-		if ctx.Err() != nil {
-			mu.Lock()
-			for _, runner := range batch {
-				results = append(results, TaskResult{
-					Name:   runner.GetName(),
-					Status: "cancelled",
-					Error:  ctx.Err(),
-				})
-				failedTasks = append(failedTasks, runner.GetName())
-				processed[runner.GetName()] = true
-			}
-			mu.Unlock()
-			break
-		}
-
-		// Execute current batch concurrently
-		batchResults := batchExecutor.Run(ctx)
-		mu.Lock()
-		results = append(results, batchResults...)
-		for _, r := range batchResults {
-			processed[r.Name] = true
-		}
-		mu.Unlock()
-
-		// Track which tasks failed in this batch
-		failedOrCancelled := make(map[string]bool)
-		for _, result := range batchResults {
-			if result.Error != nil || result.Status == "cancelled" {
-				failedTasks = append(failedTasks, result.Name)
-				failedOrCancelled[result.Name] = true
-			}
-		}
-
-		// Update in-degree and add new tasks to queue
-		for _, result := range batchResults {
-			if failedOrCancelled[result.Name] {
-				// Do not schedule dependents of failed/cancelled tasks
-				continue
-			}
-			for _, dependent := range s.graph.GetDependents(result.Name) {
-				inDegree[dependent]--
-				if inDegree[dependent] == 0 {
-					queue = append(queue, dependent)
-				}
-			}
-		}
+	// Check for errors
+	select {
+	case err := <-s.errors:
+		return err
+	default:
+		return nil
 	}
-
-	// After processing, if any tasks were not processed, mark them as failed/cancelled
-	for _, taskName := range s.graph.GetAllTasks() {
-		if !processed[taskName] {
-			results = append(results, TaskResult{
-				Name:   taskName,
-				Status: "not_executed",
-				Error:  fmt.Errorf("task was not executed due to failed or cancelled dependency"),
-			})
-		}
-	}
-
-	// Check if all tasks were executed
-	hasNotExecuted := false
-	hasCancelled := false
-	for _, r := range results {
-		if r.Status == "not_executed" {
-			hasNotExecuted = true
-		}
-		if r.Status == "cancelled" {
-			hasCancelled = true
-		}
-	}
-	if hasNotExecuted || hasCancelled {
-		return results, fmt.Errorf("some tasks were not executed or cancelled")
-	}
-
-	if len(results) != len(s.graph.GetAllTasks()) {
-		return nil, fmt.Errorf("incomplete execution: %d tasks failed (%v), possible cycle or missing tasks",
-			len(failedTasks), failedTasks)
-	}
-
-	return results, nil
 }
 
-// GetExecutionOrder returns the tasks in their execution order.
-func (s *Scheduler) GetExecutionOrder() ([]string, error) {
-	if err := s.graph.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid task graph: %w", err)
+// executeTask executes a single task
+func (s *Scheduler) executeTask(task Task) {
+	defer s.wg.Done()
+
+	// Update metrics
+	s.metrics.mu.Lock()
+	s.metrics.TasksStarted++
+	s.metrics.ActiveWorkers++
+	if s.metrics.ActiveWorkers > s.metrics.MaxWorkers {
+		s.metrics.MaxWorkers = s.metrics.ActiveWorkers
+	}
+	s.metrics.mu.Unlock()
+
+	// Record start time
+	start := time.Now()
+	s.started <- task.Name()
+
+	// Execute task
+	result, err := task.Run(s.ctx)
+	duration := time.Since(start)
+
+	// Update metrics
+	s.metrics.mu.Lock()
+	s.metrics.TotalDuration += duration
+	s.metrics.ActiveWorkers--
+	s.metrics.mu.Unlock()
+
+	// Record completion
+	s.mu.Lock()
+	s.status[task.Name()] = TaskStatus{
+		Started:   start,
+		Completed: time.Now(),
+		Duration:  duration,
+		Error:     err,
+		Result:    result.Result,
+	}
+	s.mu.Unlock()
+
+	if err != nil {
+		s.failed <- task.Name()
+		s.metrics.mu.Lock()
+		s.metrics.TasksFailed++
+		s.metrics.mu.Unlock()
+		s.errors <- fmt.Errorf("task %s failed: %w", task.Name(), err)
+		return
 	}
 
-	// Calculate in-degree for each task
-	inDegree := make(map[string]int)
-	for _, taskName := range s.graph.GetAllTasks() {
-		deps := s.graph.GetDependencies(taskName)
-		inDegree[taskName] = len(deps)
+	// Send result
+	s.results <- result
+
+	// Update metrics
+	s.metrics.mu.Lock()
+	s.metrics.TasksCompleted++
+	s.metrics.mu.Unlock()
+
+	// Notify completion
+	s.done <- task.Name()
+
+	// Get next runnable tasks
+	nextTasks := s.graph.GetNextTasks(task.Name())
+	for _, nextTask := range nextTasks {
+		s.wg.Add(1)
+		go s.executeTask(nextTask)
 	}
+}
 
-	// Initialize queue with tasks that have no dependencies
-	queue := make([]string, 0)
-	for taskName, degree := range inDegree {
-		if degree == 0 {
-			queue = append(queue, taskName)
-		}
-	}
+// monitor handles task completion and error notifications
+func (s *Scheduler) monitor() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 
-	// Process tasks in order
-	order := make([]string, 0)
-	for len(queue) > 0 {
-		taskName := queue[0]
-		queue = queue[1:]
-		order = append(order, taskName)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.cancel:
+			s.cancelFunc()
+			return
+		case <-ticker.C:
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
 
-		// Update in-degree for dependents
-		for _, dependent := range s.graph.GetDependents(taskName) {
-			inDegree[dependent]--
-			if inDegree[dependent] == 0 {
-				queue = append(queue, dependent)
+			s.metrics.mu.Lock()
+			s.metrics.AllocBytes = m.Alloc
+			s.metrics.TotalAllocBytes = m.TotalAlloc
+			s.metrics.NumGC = m.NumGC
+			if s.metrics.TasksCompleted > 0 {
+				s.metrics.WorkerUtilization = float64(s.metrics.ActiveWorkers) / float64(s.metrics.MaxWorkers)
 			}
+			s.metrics.mu.Unlock()
 		}
 	}
+}
 
-	// Check if all tasks were ordered
-	if len(order) != len(s.graph.GetAllTasks()) {
-		return nil, fmt.Errorf("incomplete ordering: possible cycle or missing tasks")
-	}
+// GetMetrics returns the current scheduler metrics
+func (s *Scheduler) GetMetrics() SchedulerMetrics {
+	s.metrics.mu.RLock()
+	defer s.metrics.mu.RUnlock()
+	return *s.metrics
+}
 
-	return order, nil
+// GetTaskStatus returns the execution status of a task
+func (s *Scheduler) GetTaskStatus(taskName string) (TaskStatus, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status, exists := s.status[taskName]
+	return status, exists
+}
+
+// Cancel stops the scheduler and all running tasks
+func (s *Scheduler) Cancel() {
+	close(s.cancel)
 }

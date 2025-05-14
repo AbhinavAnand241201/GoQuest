@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 var (
@@ -12,49 +13,69 @@ var (
 	registryLock sync.RWMutex
 )
 
-// TaskSpec defines a task's metadata and execution behavior.
+// Task represents a unit of work that can be executed
+type Task interface {
+	// Name returns the unique identifier for this task
+	Name() string
+	// Run executes the task and returns its result
+	Run(ctx context.Context) (TaskResult, error)
+}
+
+// TaskSpec defines the configuration for a task
 type TaskSpec struct {
-	// Name is a unique identifier for the task
-	Name string
-	// Run is the function that executes the task
-	Run func(context.Context) (interface{}, error)
-	// Depends lists the names of tasks that must complete before this task runs
-	Depends []string
+	Name         string            `json:"name"`
+	Command      string            `json:"command"`
+	Args         []string          `json:"args,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Dir          string            `json:"dir,omitempty"`
+	Dependencies []string          `json:"dependencies,omitempty"`
 }
 
 // TaskRunner defines the interface for executing tasks.
 type TaskRunner interface {
 	// Run executes the task and returns its result and any error
-	Run(context.Context) (interface{}, error)
+	Run(context.Context) (TaskResult, error)
 	// GetName returns the task's name
 	GetName() string
 	// GetDependencies returns the task's dependencies
 	GetDependencies() []string
 }
 
-// Task wraps a TaskSpec and implements TaskRunner.
-type Task struct {
-	Spec TaskSpec
+// TaskResult represents the result of a task execution
+type TaskResult struct {
+	Name     string
+	Result   string
+	Duration time.Duration
 }
 
-// NewTask creates a new Task from a TaskSpec.
-func NewTask(spec TaskSpec) *Task {
-	return &Task{Spec: spec}
+// task implements the Task interface
+type task struct {
+	spec TaskSpec
 }
 
-// Run executes the task's Run function.
-func (t *Task) Run(ctx context.Context) (interface{}, error) {
-	return t.Spec.Run(ctx)
+// NewTask creates a new task from a specification
+func NewTask(spec TaskSpec) Task {
+	return &task{
+		spec: spec,
+	}
 }
 
-// GetName returns the task's name.
-func (t *Task) GetName() string {
-	return t.Spec.Name
+// Name returns the task's name
+func (t *task) Name() string {
+	return t.spec.Name
 }
 
-// GetDependencies returns the task's dependencies.
-func (t *Task) GetDependencies() []string {
-	return t.Spec.Depends
+// Run executes the task and returns its result
+func (t *task) Run(ctx context.Context) (TaskResult, error) {
+	start := time.Now()
+	// TODO: Implement actual task execution
+	result := fmt.Sprintf("Task %s completed", t.spec.Name)
+	duration := time.Since(start)
+	return TaskResult{
+		Name:     t.spec.Name,
+		Result:   result,
+		Duration: duration,
+	}, nil
 }
 
 // Validate ensures the TaskSpec is valid.
@@ -62,10 +83,10 @@ func (t TaskSpec) Validate() error {
 	if t.Name == "" {
 		return fmt.Errorf("task name cannot be empty")
 	}
-	if t.Run == nil {
-		return fmt.Errorf("task run function cannot be nil")
+	if t.Command == "" {
+		return fmt.Errorf("task command cannot be empty")
 	}
-	for _, dep := range t.Depends {
+	for _, dep := range t.Dependencies {
 		if dep == "" {
 			return fmt.Errorf("dependency name cannot be empty")
 		}
@@ -98,7 +119,7 @@ func RegisterTasks(specs []TaskSpec) error {
 }
 
 // GetTask returns a task by name from the registry.
-func GetTask(name string) (*Task, error) {
+func GetTask(name string) (Task, error) {
 	registryLock.RLock()
 	defer registryLock.RUnlock()
 
@@ -110,11 +131,11 @@ func GetTask(name string) (*Task, error) {
 }
 
 // GetAllTasks returns all registered tasks.
-func GetAllTasks() []*Task {
+func GetAllTasks() []Task {
 	registryLock.RLock()
 	defer registryLock.RUnlock()
 
-	tasks := make([]*Task, 0, len(taskRegistry))
+	tasks := make([]Task, 0, len(taskRegistry))
 	for _, spec := range taskRegistry {
 		tasks = append(tasks, NewTask(spec))
 	}
