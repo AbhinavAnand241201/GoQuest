@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -25,6 +26,20 @@ func SetVerbose(enabled bool) {
 	logMutex.Lock()
 	verbose = enabled
 	logMutex.Unlock()
+}
+
+// SetOutput sets the output destination for both info and error logs.
+// This is primarily used for testing.
+func SetOutput(w io.Writer) {
+	logMutex.Lock()
+	defer logMutex.Unlock()
+	if w == nil {
+		infoLogger = log.New(os.Stdout, "", 0)
+		errorLogger = log.New(os.Stderr, "", 0)
+		return
+	}
+	infoLogger = log.New(w, "", 0)
+	errorLogger = log.New(w, "", 0)
 }
 
 // LogInfo logs an informational message with a timestamp.
@@ -64,5 +79,5 @@ func LogFatal(format string, v ...interface{}) {
 	timestamp := time.Now().UTC().Format("2006-01-02 15:04:05")
 	msg := fmt.Sprintf(format, v...)
 	errorLogger.Printf("%s FATAL: %s", timestamp, msg)
-	os.Exit(1)
+	osExit(1)
 }
