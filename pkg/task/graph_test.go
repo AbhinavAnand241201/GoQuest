@@ -1,7 +1,6 @@
 package task
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -12,7 +11,6 @@ func TestTaskGraph_AddTask(t *testing.T) {
 	// Test adding a task with no dependencies
 	task1 := TaskSpec{
 		Name: "task1",
-		Run:  func(ctx context.Context) (interface{}, error) { return nil, nil },
 	}
 	if err := graph.AddTask(task1); err != nil {
 		t.Errorf("AddTask failed: %v", err)
@@ -20,9 +18,8 @@ func TestTaskGraph_AddTask(t *testing.T) {
 
 	// Test adding a task with dependencies
 	task2 := TaskSpec{
-		Name:    "task2",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task1"},
+		Name:         "task2",
+		Dependencies: []string{"task1"},
 	}
 	if err := graph.AddTask(task2); err != nil {
 		t.Errorf("AddTask failed: %v", err)
@@ -46,19 +43,16 @@ func TestTaskGraph_Validate_Cycle(t *testing.T) {
 
 	// Create a cyclic dependency: task1 -> task2 -> task3 -> task1
 	task1 := TaskSpec{
-		Name:    "task1",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task3"},
+		Name:         "task1",
+		Dependencies: []string{"task3"},
 	}
 	task2 := TaskSpec{
-		Name:    "task2",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task1"},
+		Name:         "task2",
+		Dependencies: []string{"task1"},
 	}
 	task3 := TaskSpec{
-		Name:    "task3",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task2"},
+		Name:         "task3",
+		Dependencies: []string{"task2"},
 	}
 
 	graph.AddTask(task1)
@@ -85,9 +79,8 @@ func TestTaskGraph_Validate_MissingDependency(t *testing.T) {
 
 	// Create a task with a non-existent dependency
 	task1 := TaskSpec{
-		Name:    "task1",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"non_existent"},
+		Name:         "task1",
+		Dependencies: []string{"non_existent"},
 	}
 
 	graph.AddTask(task1)
@@ -107,22 +100,18 @@ func TestTaskGraph_Validate_ValidDAG(t *testing.T) {
 	// Create a valid DAG: task1 -> task2 -> task4, task1 -> task3 -> task4
 	task1 := TaskSpec{
 		Name: "task1",
-		Run:  func(ctx context.Context) (interface{}, error) { return nil, nil },
 	}
 	task2 := TaskSpec{
-		Name:    "task2",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task1"},
+		Name:         "task2",
+		Dependencies: []string{"task1"},
 	}
 	task3 := TaskSpec{
-		Name:    "task3",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task1"},
+		Name:         "task3",
+		Dependencies: []string{"task1"},
 	}
 	task4 := TaskSpec{
-		Name:    "task4",
-		Run:     func(ctx context.Context) (interface{}, error) { return nil, nil },
-		Depends: []string{"task2", "task3"},
+		Name:         "task4",
+		Dependencies: []string{"task2", "task3"},
 	}
 
 	graph.AddTask(task1)
@@ -141,7 +130,6 @@ func TestTaskGraph_GetTaskSpec(t *testing.T) {
 
 	task1 := TaskSpec{
 		Name: "task1",
-		Run:  func(ctx context.Context) (interface{}, error) { return nil, nil },
 	}
 	graph.AddTask(task1)
 
@@ -166,11 +154,9 @@ func TestTaskGraph_GetAllTasks(t *testing.T) {
 
 	task1 := TaskSpec{
 		Name: "task1",
-		Run:  func(ctx context.Context) (interface{}, error) { return nil, nil },
 	}
 	task2 := TaskSpec{
 		Name: "task2",
-		Run:  func(ctx context.Context) (interface{}, error) { return nil, nil },
 	}
 
 	graph.AddTask(task1)
@@ -184,7 +170,7 @@ func TestTaskGraph_GetAllTasks(t *testing.T) {
 	// Check that both tasks are present
 	taskMap := make(map[string]bool)
 	for _, task := range tasks {
-		taskMap[task] = true
+		taskMap[task.Name] = true
 	}
 	if !taskMap["task1"] || !taskMap["task2"] {
 		t.Error("Expected both task1 and task2 to be present")

@@ -13,14 +13,12 @@ func TestConvertTaskResults(t *testing.T) {
 	results := []task.TaskResult{
 		{
 			Name:     "task1",
-			Status:   "success",
 			Result:   "Hello",
 			Error:    nil,
 			Duration: 100 * time.Millisecond,
 		},
 		{
 			Name:     "task2",
-			Status:   "failed",
 			Result:   nil,
 			Error:    errors.New("task failed"),
 			Duration: 200 * time.Millisecond,
@@ -78,7 +76,8 @@ func TestPrintError(t *testing.T) {
 		t.Errorf("Error marshaling error: %v", err)
 	}
 
-	expected := string(jsonData) + "\n"
+	// We expect the output to be this JSON string plus a newline
+	_ = string(jsonData) + "\n"
 	// Note: We can't easily test the actual output since it writes to stderr
 	// This test just ensures the function doesn't panic
 	PrintError(err)

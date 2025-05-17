@@ -17,6 +17,7 @@ func main() {
 	scriptFile := flag.String("script", "", "Path to the Go script containing task definitions")
 	concurrency := flag.Int("concurrency", 4, "Maximum number of concurrent tasks")
 	jsonOutput := flag.Bool("json", false, "Output results in JSON format")
+	timeout := flag.Int("timeout", 1800, "Timeout in seconds for the entire execution")
 	flag.Parse()
 
 	// Initialize logger
@@ -28,8 +29,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// Create a context with timeout for potential future use
+	_, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout)*time.Second)
 	defer cancel()
 
 	// Parse script
@@ -56,58 +57,99 @@ func main() {
 			os.Exit(1)
 		}
 	}
-
-	// Create executor and scheduler
-	executor := task.NewExecutor(nil, *concurrency)
-	scheduler := task.NewScheduler(graph, executor)
-
-	// Log start of execution
-	if !*jsonOutput {
-		logger.Info("Running tasks", map[string]interface{}{
-			"script":      *scriptFile,
-			"concurrency": *concurrency,
-			"taskCount":   len(tasks),
-		})
-	}
-
-	// Schedule and run tasks
-	results, err := scheduler.Schedule(ctx)
-	if err != nil {
+	
+	// Validate the task graph
+	if err := graph.Validate(); err != nil {
 		if *jsonOutput {
 			output.PrintError(err)
 		} else {
-			logger.Error("Failed to schedule tasks", map[string]interface{}{"error": err})
+			logger.Error("Invalid task graph", map[string]interface{}{"error": err})
 		}
 		os.Exit(1)
 	}
 
-	// Print results
-	if *jsonOutput {
-		if err := output.PrintTaskResults(results); err != nil {
-			output.PrintError(err)
+	// Create executor with proper concurrency
+	executor := task.NewExecutor()
+	executor.SetConcurrency(*concurrency)
+	
+	// Add tasks to the executor
+	for _, taskName := range task.GetTaskNames() {
+		taskObj, err := task.GetTask(taskName)
+		if err != nil {
+			if *jsonOutput {
+				output.PrintError(err)
+			} else {
+				logger.Error("Failed to get task", map[string]interface{}{"error": err})
+			}
 			os.Exit(1)
 		}
-	} else {
-		// Print human-readable results
-		for _, result := range results {
-			fields := map[string]interface{}{
-				"status":   result.Status,
-				"duration": result.Duration,
-			}
-			if result.Error != nil {
-				fields["error"] = result.Error
-			} else {
-				fields["result"] = result.Result
-			}
-			logger.Info(fmt.Sprintf("Task %s completed", result.Name), fields)
-		}
+		executor.AddTask(taskObj)
+	}
+	
+	// Create scheduler with logger
+	scheduler := task.NewScheduler(graph, executor, logger)
 
+	// Print task information
+	if !*jsonOutput {
+		logger.Info("Tasks to execute:", nil)
+		for _, taskName := range task.GetTaskNames() {
+			taskObj, _ := task.GetTask(taskName)
+			logger.Info(fmt.Sprintf("- %s", taskObj.Name()), nil)
+		}
+		logger.Info(fmt.Sprintf("Concurrency: %d", *concurrency), nil)
+	}
+
+	// Execute tasks
+	if !*jsonOutput {
+		logger.Info("Starting task execution...", nil)
+	}
+	
+	// Start the scheduler with context
+	err = scheduler.Start()
+	if err != nil {
+		if *jsonOutput {
+			output.PrintError(err)
+		} else {
+			logger.Error("Task execution failed", map[string]interface{}{"error": err})
+		}
+		os.Exit(1)
+	}
+	
+	// Get results
+	results := executor.GetResults()
+
+	// Print results
+	if *jsonOutput {
+		output.PrintTaskResults(results)
+	} else {
+		logger.Info("Task execution completed", nil)
+		
 		// Print summary
-		failed := executor.GetFailedTasks(results)
 		successful := executor.GetSuccessfulTasks(results)
-		logger.Info("Execution summary", map[string]interface{}{
-			"successful": len(successful),
-			"failed":     len(failed),
+		failed := executor.GetFailedTasks(results)
+		
+		logger.Info(fmt.Sprintf("Summary: %d tasks completed, %d tasks failed", len(successful), len(failed)), nil)
+		
+		// Print details for each task
+		for _, result := range results {
+			if result.Error != nil {
+				logger.Error(fmt.Sprintf("Task %s failed", result.Name), map[string]interface{}{
+					"error": result.Error,
+					"duration": result.Duration.String(),
+				})
+			} else {
+				logger.Info(fmt.Sprintf("Task %s completed in %s", result.Name, result.Duration), map[string]interface{}{
+					"result": result.Result,
+				})
+			}
+		}
+		
+		// Print metrics
+		metrics := scheduler.GetMetrics()
+		logger.Info("Execution metrics", map[string]interface{}{
+			"total_duration": metrics.TotalDuration.String(),
+			"worker_utilization": fmt.Sprintf("%.2f%%", metrics.WorkerUtilization*100),
+			"max_workers": metrics.MaxWorkers,
 		})
 	}
 

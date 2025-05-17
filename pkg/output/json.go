@@ -21,9 +21,15 @@ type TaskResultJSON struct {
 func ConvertTaskResults(results []task.TaskResult) []TaskResultJSON {
 	jsonResults := make([]TaskResultJSON, len(results))
 	for i, result := range results {
+		// Determine status based on error field
+		status := "success"
+		if result.Error != nil {
+			status = "failed"
+		}
+		
 		jsonResults[i] = TaskResultJSON{
 			Name:     result.Name,
-			Status:   result.Status,
+			Status:   status,
 			Result:   result.Result,
 			Duration: result.Duration.String(),
 		}
@@ -47,14 +53,19 @@ func PrintTaskResults(results []task.TaskResult) error {
 
 // PrintError prints an error in JSON format
 func PrintError(err error) error {
+	// Handle nil error case
+	if err == nil {
+		return nil
+	}
+
 	errorJSON := struct {
 		Error string `json:"error"`
 	}{
 		Error: err.Error(),
 	}
-	jsonData, err := json.MarshalIndent(errorJSON, "", "  ")
-	if err != nil {
-		return fmt.Errorf("error marshaling error: %w", err)
+	jsonData, jsonErr := json.MarshalIndent(errorJSON, "", "  ")
+	if jsonErr != nil {
+		return fmt.Errorf("error marshaling error: %w", jsonErr)
 	}
 	fmt.Fprintln(os.Stderr, string(jsonData))
 	return nil

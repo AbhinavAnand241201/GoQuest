@@ -106,13 +106,14 @@ func (p *Parser) extractTaskSpecs(structType *ast.StructType, structName string)
 				if strings.HasPrefix(part, "depends=") {
 					deps := strings.TrimPrefix(part, "depends=")
 					if deps != "" {
-						spec.Depends = strings.Split(deps, ",")
+						// Use Dependencies field instead of Depends
+						spec.Dependencies = strings.Split(deps, ",")
 					}
 				}
 			}
 		}
 		if spec.Name != "" {
-			for _, dep := range spec.Depends {
+			for _, dep := range spec.Dependencies {
 				if dep == "" {
 					return nil, &ParserError{
 						File:    p.fset.File(structType.Pos()).Name(),

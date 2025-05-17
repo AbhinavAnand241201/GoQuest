@@ -35,6 +35,7 @@ type Scheduler struct {
 	logger     *log.Logger
 	minWorkers int
 	maxWorkers int
+	// Worker pool semaphore to limit concurrent tasks
 	workerPool chan struct{}
 	metrics    *SchedulerMetrics
 	// Channel for task results
@@ -61,26 +62,21 @@ type Scheduler struct {
 	cancelFunc context.CancelFunc
 }
 
-// TaskResult represents the result of a task execution
-type TaskResult struct {
-	TaskName string
-	Result   string
-	Duration time.Duration
-}
-
-// TaskStatus represents the execution status of a task
-type TaskStatus struct {
-	Started   time.Time
-	Completed time.Time
-	Duration  time.Duration
-	Error     error
-	Result    string
-}
-
 // NewScheduler creates a new scheduler for the given task graph
 func NewScheduler(graph *TaskGraph, executor *Executor, logger *log.Logger) *Scheduler {
+	// For backward compatibility with tests that don't provide a logger
+	if logger == nil {
+		logger = log.NewLogger(false)
+	}
 	minWorkers := runtime.NumCPU()
 	maxWorkers := minWorkers * 4 // Allow up to 4x CPU cores
+
+	// Calculate buffer size based on expected number of tasks
+	taskCount := graph.Size()
+	bufferSize := taskCount * 2 // Buffer size should be at least 2x the number of tasks
+	if bufferSize < 10 {
+		bufferSize = 10 // Minimum buffer size
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
@@ -91,12 +87,12 @@ func NewScheduler(graph *TaskGraph, executor *Executor, logger *log.Logger) *Sch
 		maxWorkers: maxWorkers,
 		workerPool: make(chan struct{}, maxWorkers),
 		metrics:    &SchedulerMetrics{},
-		results:    make(chan TaskResult),
-		errors:     make(chan error),
+		results:    make(chan TaskResult, bufferSize),
+		errors:     make(chan error, bufferSize),
 		status:     make(map[string]TaskStatus),
-		done:       make(chan string),
-		started:    make(chan string),
-		failed:     make(chan string),
+		done:       make(chan string, bufferSize),
+		started:    make(chan string, bufferSize),
+		failed:     make(chan string, bufferSize),
 		cancel:     make(chan struct{}),
 		ctx:        ctx,
 		cancelFunc: cancel,
@@ -105,6 +101,19 @@ func NewScheduler(graph *TaskGraph, executor *Executor, logger *log.Logger) *Sch
 
 // Start begins executing tasks in the graph
 func (s *Scheduler) Start() error {
+	return s.startExecution(context.Background())
+}
+
+// Schedule is a backward compatibility method that wraps Start
+// It's used by tests that expect the old API
+func (s *Scheduler) Schedule(ctx context.Context) ([]TaskResult, error) {
+	err := s.startExecution(ctx)
+	// Return the results from the executor
+	return s.executor.GetResults(), err
+}
+
+// startExecution is the internal implementation of task execution
+func (s *Scheduler) startExecution(ctx context.Context) error {
 	// Validate the graph
 	if err := s.graph.Validate(); err != nil {
 		return fmt.Errorf("invalid task graph: %w", err)
@@ -139,7 +148,13 @@ func (s *Scheduler) Start() error {
 
 // executeTask executes a single task
 func (s *Scheduler) executeTask(task Task) {
-	defer s.wg.Done()
+	// Acquire a worker slot from the pool
+	s.workerPool <- struct{}{}
+	defer func() {
+		// Release the worker slot when done
+		<-s.workerPool
+		s.wg.Done()
+	}()
 
 	// Update metrics
 	s.metrics.mu.Lock()
@@ -152,7 +167,20 @@ func (s *Scheduler) executeTask(task Task) {
 
 	// Record start time
 	start := time.Now()
-	s.started <- task.Name()
+	
+	// Send started notification with non-blocking select
+	select {
+	case s.started <- task.Name():
+		// Successfully sent
+	case <-s.ctx.Done():
+		// Context cancelled, exit early
+		return
+	default:
+		// Channel full, log and continue
+		s.logger.Debug("Started channel full, skipping notification", map[string]interface{}{
+			"task": task.Name(),
+		})
+	}
 
 	// Execute task
 	result, err := task.Run(s.ctx)
@@ -176,24 +204,74 @@ func (s *Scheduler) executeTask(task Task) {
 	s.mu.Unlock()
 
 	if err != nil {
-		s.failed <- task.Name()
+		// Send failed notification with non-blocking select
+		select {
+		case s.failed <- task.Name():
+			// Successfully sent
+		case <-s.ctx.Done():
+			// Context cancelled, exit early
+			return
+		default:
+			// Channel full, log and continue
+			s.logger.Debug("Failed channel full, skipping notification", map[string]interface{}{
+				"task": task.Name(),
+				"error": err.Error(),
+			})
+		}
+		
 		s.metrics.mu.Lock()
 		s.metrics.TasksFailed++
 		s.metrics.mu.Unlock()
-		s.errors <- fmt.Errorf("task %s failed: %w", task.Name(), err)
+		
+		// Send error with non-blocking select
+		select {
+		case s.errors <- fmt.Errorf("task %s failed: %w", task.Name(), err):
+			// Successfully sent
+		case <-s.ctx.Done():
+			// Context cancelled, exit early
+			return
+		default:
+			// Channel full, log and continue
+			s.logger.Error("Error channel full, dropping error", map[string]interface{}{
+				"task": task.Name(),
+				"error": err.Error(),
+			})
+		}
 		return
 	}
 
-	// Send result
-	s.results <- result
+	// Send result with non-blocking select
+	select {
+	case s.results <- result:
+		// Successfully sent
+	case <-s.ctx.Done():
+		// Context cancelled, exit early
+		return
+	default:
+		// Channel full, log and continue
+		s.logger.Debug("Results channel full, dropping result", map[string]interface{}{
+			"task": task.Name(),
+		})
+	}
 
 	// Update metrics
 	s.metrics.mu.Lock()
 	s.metrics.TasksCompleted++
 	s.metrics.mu.Unlock()
 
-	// Notify completion
-	s.done <- task.Name()
+	// Send done notification with non-blocking select
+	select {
+	case s.done <- task.Name():
+		// Successfully sent
+	case <-s.ctx.Done():
+		// Context cancelled, exit early
+		return
+	default:
+		// Channel full, log and continue
+		s.logger.Debug("Done channel full, skipping notification", map[string]interface{}{
+			"task": task.Name(),
+		})
+	}
 
 	// Get next runnable tasks
 	nextTasks := s.graph.GetNextTasks(task.Name())
@@ -215,6 +293,21 @@ func (s *Scheduler) monitor() {
 		case <-s.cancel:
 			s.cancelFunc()
 			return
+		case taskName := <-s.started:
+			// Process task started notification
+			s.logger.Debug("Task started", map[string]interface{}{
+				"task": taskName,
+			})
+		case taskName := <-s.done:
+			// Process task completion notification
+			s.logger.Debug("Task completed", map[string]interface{}{
+				"task": taskName,
+			})
+		case taskName := <-s.failed:
+			// Process task failure notification
+			s.logger.Debug("Task failed", map[string]interface{}{
+				"task": taskName,
+			})
 		case <-ticker.C:
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
@@ -235,7 +328,20 @@ func (s *Scheduler) monitor() {
 func (s *Scheduler) GetMetrics() SchedulerMetrics {
 	s.metrics.mu.RLock()
 	defer s.metrics.mu.RUnlock()
-	return *s.metrics
+	
+	// Create a copy without the mutex to avoid copying the mutex
+	return SchedulerMetrics{
+		TasksStarted:      s.metrics.TasksStarted,
+		TasksCompleted:    s.metrics.TasksCompleted,
+		TasksFailed:       s.metrics.TasksFailed,
+		TotalDuration:     s.metrics.TotalDuration,
+		ActiveWorkers:     s.metrics.ActiveWorkers,
+		MaxWorkers:        s.metrics.MaxWorkers,
+		WorkerUtilization: s.metrics.WorkerUtilization,
+		AllocBytes:        s.metrics.AllocBytes,
+		TotalAllocBytes:   s.metrics.TotalAllocBytes,
+		NumGC:             s.metrics.NumGC,
+	}
 }
 
 // GetTaskStatus returns the execution status of a task
@@ -249,4 +355,15 @@ func (s *Scheduler) GetTaskStatus(taskName string) (TaskStatus, bool) {
 // Cancel stops the scheduler and all running tasks
 func (s *Scheduler) Cancel() {
 	close(s.cancel)
+}
+
+// GetExecutionOrder is a backward compatibility method for tests
+// It returns the order in which tasks were executed
+func (s *Scheduler) GetExecutionOrder() ([]string, error) {
+	results := s.executor.GetResults()
+	order := make([]string, len(results))
+	for i, result := range results {
+		order[i] = result.Name
+	}
+	return order, nil
 }

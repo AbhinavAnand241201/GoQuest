@@ -7,8 +7,8 @@ import (
 	"github.com/AbhinavAnand241201/goquest/pkg/task"
 )
 
-// Tasks demonstrates task execution with JSON output
-type Tasks struct {
+// JsonTasks demonstrates task execution with JSON output
+type JsonTasks struct {
 	Task1 struct {
 		Run func(context.Context) (interface{}, error) `task:"name=task1"`
 	} `task:"name=task1"`
@@ -23,7 +23,7 @@ type Tasks struct {
 }
 
 func init() {
-	tasks := Tasks{}
+	tasks := JsonTasks{}
 
 	// Task1: Simple success
 	tasks.Task1.Run = func(ctx context.Context) (interface{}, error) {

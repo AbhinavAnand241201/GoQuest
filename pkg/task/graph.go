@@ -104,20 +104,33 @@ func (g *TaskGraph) GetRunnableTasks() []Task {
 func (g *TaskGraph) GetNextTasks(name string) []Task {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+	
+	// Create a map to track completed tasks
+	completedTasks := make(map[string]bool)
+	completedTasks[name] = true
+	
 	var next []Task
+	
+	// Check each task that depends on the completed task
 	for _, depName := range g.dependents[name] {
-		// Check if all dependencies are satisfied
+		// Check if all dependencies for this task are satisfied
 		allDepsSatisfied := true
+		
+		// For each dependency of the dependent task
 		for _, dep := range g.dependencies[depName] {
-			if dep != name {
+			// If the dependency is not marked as completed, it's not satisfied
+			if !completedTasks[dep] {
 				allDepsSatisfied = false
 				break
 			}
 		}
+		
+		// If all dependencies are satisfied, add this task to the next batch
 		if allDepsSatisfied {
 			next = append(next, NewTask(g.tasks[depName]))
 		}
 	}
+	
 	return next
 }
 

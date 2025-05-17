@@ -8,8 +8,8 @@ import (
 	"github.com/AbhinavAnand241201/goquest/pkg/task"
 )
 
-// Tasks demonstrates error handling with JSON output
-type Tasks struct {
+// ErrorTasks demonstrates error handling with JSON output
+type ErrorTasks struct {
 	Task1 struct {
 		Run func(context.Context) (interface{}, error) `task:"name=task1"`
 	} `task:"name=task1"`
@@ -24,7 +24,7 @@ type Tasks struct {
 }
 
 func init() {
-	tasks := Tasks{}
+	tasks := ErrorTasks{}
 
 	// Task1: Simple success
 	tasks.Task1.Run = func(ctx context.Context) (interface{}, error) {

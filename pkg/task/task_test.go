@@ -79,8 +79,9 @@ func TestTask_Run(t *testing.T) {
 	if err != nil {
 		t.Errorf("Task.Run() error = %v", err)
 	}
-	if result != expected {
-		t.Errorf("Task.Run() = %v, want %v", result, expected)
+	// Compare the Result field of TaskResult with expected
+	if result.Result != expected {
+		t.Errorf("Task.Run() result = %v, want %v", result.Result, expected)
 	}
 }
 
@@ -104,7 +105,8 @@ func TestTask_RunWithContextCancellation(t *testing.T) {
 	if err != context.DeadlineExceeded {
 		t.Errorf("Task.Run() error = %v, want %v", err, context.DeadlineExceeded)
 	}
-	if result != nil {
-		t.Errorf("Task.Run() = %v, want nil", result)
+	// Check that Result field is nil, not the TaskResult itself
+	if result.Result != nil {
+		t.Errorf("Task.Run() result = %v, want nil", result.Result)
 	}
 }
