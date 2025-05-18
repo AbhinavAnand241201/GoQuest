@@ -84,10 +84,10 @@ func getExecutionOrderFromResults(results []TaskResult) []string {
 // Mock logger for testing
 type mockLogger struct{}
 
-func (l *mockLogger) Info(msg string, data map[string]interface{}) {}
+func (l *mockLogger) Info(msg string, data map[string]interface{})  {}
 func (l *mockLogger) Error(msg string, data map[string]interface{}) {}
 func (l *mockLogger) Debug(msg string, data map[string]interface{}) {}
-func (l *mockLogger) Warn(msg string, data map[string]interface{}) {}
+func (l *mockLogger) Warn(msg string, data map[string]interface{})  {}
 
 // No need for a placeholder variable
 
@@ -335,5 +335,299 @@ func TestScheduler_ContextCancellation(t *testing.T) {
 	}
 	if !foundTask2 {
 		t.Error("task2 result not found")
+	}
+}
+
+func TestSchedule_Linear(t *testing.T) {
+	graph := NewTaskGraph()
+	executor := NewExecutor(1)
+
+	// Create tasks with linear dependencies: A -> B -> C
+	taskA := TaskSpec{
+		Name: "taskA",
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskA result", nil
+		},
+	}
+	taskB := TaskSpec{
+		Name:         "taskB",
+		Dependencies: []string{"taskA"},
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskB result", nil
+		},
+	}
+	taskC := TaskSpec{
+		Name:         "taskC",
+		Dependencies: []string{"taskB"},
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskC result", nil
+		},
+	}
+
+	graph.AddTask(taskA)
+	graph.AddTask(taskB)
+	graph.AddTask(taskC)
+
+	// Add tasks to executor
+	for _, spec := range graph.GetAllTasks() {
+		executor.AddTask(NewTask(spec))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	results := executor.Run(ctx)
+
+	// Verify execution order
+	executionOrder := make([]string, 0)
+	for _, result := range results {
+		executionOrder = append(executionOrder, result.Name)
+	}
+
+	expectedOrder := []string{"taskA", "taskB", "taskC"}
+	for i, name := range expectedOrder {
+		if executionOrder[i] != name {
+			t.Errorf("Expected task %s at position %d, got %s", name, i, executionOrder[i])
+		}
+	}
+}
+
+func TestSchedule_Parallel(t *testing.T) {
+	graph := NewTaskGraph()
+	executor := NewExecutor(4)
+
+	// Create independent tasks
+	tasks := []TaskSpec{
+		{
+			Name: "task1",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task1 result", nil
+			},
+		},
+		{
+			Name: "task2",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task2 result", nil
+			},
+		},
+		{
+			Name: "task3",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task3 result", nil
+			},
+		},
+		{
+			Name: "task4",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task4 result", nil
+			},
+		},
+	}
+
+	for _, task := range tasks {
+		graph.AddTask(task)
+	}
+
+	// Add tasks to executor
+	for _, spec := range graph.GetAllTasks() {
+		executor.AddTask(NewTask(spec))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	results := executor.Run(ctx)
+	duration := time.Since(start)
+
+	// Verify all tasks completed
+	if len(results) != len(tasks) {
+		t.Errorf("Expected %d results, got %d", len(tasks), len(results))
+	}
+
+	// Verify parallel execution (should take ~0.1s, not 0.4s)
+	if duration > 200*time.Millisecond {
+		t.Errorf("Expected parallel execution, took %v", duration)
+	}
+}
+
+func TestSchedule_Cycle(t *testing.T) {
+	graph := NewTaskGraph()
+	executor := NewExecutor(1)
+
+	// Create cyclic dependency: A -> B -> C -> A
+	taskA := TaskSpec{
+		Name:         "taskA",
+		Dependencies: []string{"taskC"},
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskA result", nil
+		},
+	}
+	taskB := TaskSpec{
+		Name:         "taskB",
+		Dependencies: []string{"taskA"},
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskB result", nil
+		},
+	}
+	taskC := TaskSpec{
+		Name:         "taskC",
+		Dependencies: []string{"taskB"},
+		Run: func(ctx context.Context) (interface{}, error) {
+			time.Sleep(10 * time.Millisecond)
+			return "taskC result", nil
+		},
+	}
+
+	graph.AddTask(taskA)
+	graph.AddTask(taskB)
+	graph.AddTask(taskC)
+
+	// Add tasks to executor
+	for _, spec := range graph.GetAllTasks() {
+		executor.AddTask(NewTask(spec))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	results := executor.Run(ctx)
+
+	// Check if any tasks failed due to cycle
+	hasError := false
+	for _, result := range results {
+		if result.Error != nil {
+			hasError = true
+			break
+		}
+	}
+	if !hasError {
+		t.Error("Expected cycle detection error, got none")
+	}
+}
+
+func TestSchedule_LargeGraph(t *testing.T) {
+	graph := NewTaskGraph()
+	executor := NewExecutor(8)
+
+	// Create 100 tasks with mixed dependencies
+	for i := 0; i < 100; i++ {
+		task := TaskSpec{
+			Name:         fmt.Sprintf("task%d", i),
+			Dependencies: []string{},
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(10 * time.Millisecond)
+				return fmt.Sprintf("task%d result", i), nil
+			},
+		}
+		// Add 1-3 random dependencies for 50% of tasks
+		if i > 0 && i%2 == 0 {
+			numDeps := (i % 3) + 1
+			for j := 0; j < numDeps; j++ {
+				dep := fmt.Sprintf("task%d", (i-j-1)%i)
+				task.Dependencies = append(task.Dependencies, dep)
+			}
+		}
+		graph.AddTask(task)
+	}
+
+	// Add tasks to executor
+	for _, spec := range graph.GetAllTasks() {
+		executor.AddTask(NewTask(spec))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	results := executor.Run(ctx)
+	duration := time.Since(start)
+
+	// Verify all tasks completed
+	if len(results) != 100 {
+		t.Errorf("Expected 100 results, got %d", len(results))
+	}
+
+	// Verify performance (should complete in reasonable time)
+	if duration > 10*time.Second {
+		t.Errorf("Large graph took too long: %v", duration)
+	}
+}
+
+func TestSchedule_ConcurrencyLimit(t *testing.T) {
+	graph := NewTaskGraph()
+	executor := NewExecutor(2) // Limit to 2 concurrent tasks
+
+	// Create 4 tasks that each take 100ms
+	tasks := []TaskSpec{
+		{
+			Name: "task1",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task1 result", nil
+			},
+		},
+		{
+			Name: "task2",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task2 result", nil
+			},
+		},
+		{
+			Name: "task3",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task3 result", nil
+			},
+		},
+		{
+			Name: "task4",
+			Run: func(ctx context.Context) (interface{}, error) {
+				time.Sleep(100 * time.Millisecond)
+				return "task4 result", nil
+			},
+		},
+	}
+
+	for _, task := range tasks {
+		graph.AddTask(task)
+	}
+
+	// Add tasks to executor
+	for _, spec := range graph.GetAllTasks() {
+		executor.AddTask(NewTask(spec))
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	results := executor.Run(ctx)
+	duration := time.Since(start)
+
+	// Verify all tasks completed
+	if len(results) != len(tasks) {
+		t.Errorf("Expected %d results, got %d", len(tasks), len(results))
+	}
+
+	// With 2 concurrent tasks, 4 tasks should take ~200ms
+	// Allow some overhead
+	if duration < 150*time.Millisecond || duration > 300*time.Millisecond {
+		t.Errorf("Expected ~200ms with concurrency limit, got %v", duration)
 	}
 }

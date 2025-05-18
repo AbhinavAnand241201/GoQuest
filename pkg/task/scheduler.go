@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -167,7 +168,7 @@ func (s *Scheduler) executeTask(task Task) {
 
 	// Record start time
 	start := time.Now()
-	
+
 	// Send started notification with non-blocking select
 	select {
 	case s.started <- task.Name():
@@ -199,7 +200,7 @@ func (s *Scheduler) executeTask(task Task) {
 		Completed: time.Now(),
 		Duration:  duration,
 		Error:     err,
-		Result:    result.Result,
+		Result:    result,
 	}
 	s.mu.Unlock()
 
@@ -214,15 +215,15 @@ func (s *Scheduler) executeTask(task Task) {
 		default:
 			// Channel full, log and continue
 			s.logger.Debug("Failed channel full, skipping notification", map[string]interface{}{
-				"task": task.Name(),
+				"task":  task.Name(),
 				"error": err.Error(),
 			})
 		}
-		
+
 		s.metrics.mu.Lock()
 		s.metrics.TasksFailed++
 		s.metrics.mu.Unlock()
-		
+
 		// Send error with non-blocking select
 		select {
 		case s.errors <- fmt.Errorf("task %s failed: %w", task.Name(), err):
@@ -233,7 +234,7 @@ func (s *Scheduler) executeTask(task Task) {
 		default:
 			// Channel full, log and continue
 			s.logger.Error("Error channel full, dropping error", map[string]interface{}{
-				"task": task.Name(),
+				"task":  task.Name(),
 				"error": err.Error(),
 			})
 		}
@@ -309,18 +310,27 @@ func (s *Scheduler) monitor() {
 				"task": taskName,
 			})
 		case <-ticker.C:
-			var m runtime.MemStats
-			runtime.ReadMemStats(&m)
-
-			s.metrics.mu.Lock()
-			s.metrics.AllocBytes = m.Alloc
-			s.metrics.TotalAllocBytes = m.TotalAlloc
-			s.metrics.NumGC = m.NumGC
-			if s.metrics.TasksCompleted > 0 {
-				s.metrics.WorkerUtilization = float64(s.metrics.ActiveWorkers) / float64(s.metrics.MaxWorkers)
-			}
-			s.metrics.mu.Unlock()
+			// Update metrics periodically
+			s.updateMetrics()
 		}
+	}
+}
+
+// updateMetrics updates the scheduler metrics
+func (s *Scheduler) updateMetrics() {
+	s.metrics.mu.Lock()
+	defer s.metrics.mu.Unlock()
+
+	// Update memory metrics
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	s.metrics.AllocBytes = m.Alloc
+	s.metrics.TotalAllocBytes = m.TotalAlloc
+	s.metrics.NumGC = m.NumGC
+
+	// Calculate worker utilization
+	if s.metrics.MaxWorkers > 0 {
+		s.metrics.WorkerUtilization = float64(s.metrics.ActiveWorkers) / float64(s.metrics.MaxWorkers)
 	}
 }
 
@@ -328,42 +338,43 @@ func (s *Scheduler) monitor() {
 func (s *Scheduler) GetMetrics() SchedulerMetrics {
 	s.metrics.mu.RLock()
 	defer s.metrics.mu.RUnlock()
-	
-	// Create a copy without the mutex to avoid copying the mutex
-	return SchedulerMetrics{
-		TasksStarted:      s.metrics.TasksStarted,
-		TasksCompleted:    s.metrics.TasksCompleted,
-		TasksFailed:       s.metrics.TasksFailed,
-		TotalDuration:     s.metrics.TotalDuration,
-		ActiveWorkers:     s.metrics.ActiveWorkers,
-		MaxWorkers:        s.metrics.MaxWorkers,
-		WorkerUtilization: s.metrics.WorkerUtilization,
-		AllocBytes:        s.metrics.AllocBytes,
-		TotalAllocBytes:   s.metrics.TotalAllocBytes,
-		NumGC:             s.metrics.NumGC,
-	}
+	return *s.metrics
 }
 
-// GetTaskStatus returns the execution status of a task
+// GetTaskStatus returns the status of a specific task
 func (s *Scheduler) GetTaskStatus(taskName string) (TaskStatus, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	status, exists := s.status[taskName]
-	return status, exists
+	status, ok := s.status[taskName]
+	return status, ok
 }
 
-// Cancel stops the scheduler and all running tasks
+// Cancel cancels all running tasks
 func (s *Scheduler) Cancel() {
-	close(s.cancel)
+	select {
+	case s.cancel <- struct{}{}:
+		// Successfully sent
+	default:
+		// Channel full, log and continue
+		s.logger.Debug("Cancel channel full, skipping notification", map[string]interface{}{})
+	}
 }
 
-// GetExecutionOrder is a backward compatibility method for tests
-// It returns the order in which tasks were executed
+// GetExecutionOrder returns the order in which tasks were executed
 func (s *Scheduler) GetExecutionOrder() ([]string, error) {
-	results := s.executor.GetResults()
-	order := make([]string, len(results))
-	for i, result := range results {
-		order[i] = result.Name
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create a slice of task names
+	order := make([]string, 0, len(s.status))
+	for name := range s.status {
+		order = append(order, name)
 	}
+
+	// Sort by start time
+	sort.Slice(order, func(i, j int) bool {
+		return s.status[order[i]].Started.Before(s.status[order[j]].Started)
+	})
+
 	return order, nil
 }
