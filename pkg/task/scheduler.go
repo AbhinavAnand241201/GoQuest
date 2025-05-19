@@ -108,7 +108,8 @@ func (s *Scheduler) Start() error {
 // Schedule is a backward compatibility method that wraps Start
 // It's used by tests that expect the old API
 func (s *Scheduler) Schedule(ctx context.Context) ([]TaskResult, error) {
-	err := s.startExecution(ctx)
+	// Use the scheduler's context instead of creating a new one
+	err := s.startExecution(s.ctx)
 	// Return the results from the executor
 	return s.executor.GetResults(), err
 }
@@ -135,8 +136,20 @@ func (s *Scheduler) startExecution(ctx context.Context) error {
 		go s.executeTask(task)
 	}
 
-	// Wait for all tasks to complete
-	s.wg.Wait()
+	// Wait for all tasks to complete or context cancellation
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All tasks completed
+	case <-ctx.Done():
+		// Context cancelled
+		return ctx.Err()
+	}
 
 	// Check for errors
 	select {
@@ -149,8 +162,28 @@ func (s *Scheduler) startExecution(ctx context.Context) error {
 
 // executeTask executes a single task
 func (s *Scheduler) executeTask(task Task) {
+	// Check if task's dependencies are completed
+	deps := s.graph.GetDependencies(task.Name())
+	for _, dep := range deps {
+		s.mu.RLock()
+		status, exists := s.status[dep]
+		s.mu.RUnlock()
+		if !exists || status.Error != nil {
+			// Dependency not completed or failed
+			s.wg.Done()
+			return
+		}
+	}
+
 	// Acquire a worker slot from the pool
-	s.workerPool <- struct{}{}
+	select {
+	case s.workerPool <- struct{}{}:
+		// Got a worker slot
+	case <-s.ctx.Done():
+		// Context cancelled
+		s.wg.Done()
+		return
+	}
 	defer func() {
 		// Release the worker slot when done
 		<-s.workerPool
@@ -255,11 +288,6 @@ func (s *Scheduler) executeTask(task Task) {
 		})
 	}
 
-	// Update metrics
-	s.metrics.mu.Lock()
-	s.metrics.TasksCompleted++
-	s.metrics.mu.Unlock()
-
 	// Send done notification with non-blocking select
 	select {
 	case s.done <- task.Name():
@@ -274,11 +302,39 @@ func (s *Scheduler) executeTask(task Task) {
 		})
 	}
 
-	// Get next runnable tasks
-	nextTasks := s.graph.GetNextTasks(task.Name())
-	for _, nextTask := range nextTasks {
-		s.wg.Add(1)
-		go s.executeTask(nextTask)
+	// Update metrics
+	s.metrics.mu.Lock()
+	s.metrics.TasksCompleted++
+	s.metrics.mu.Unlock()
+
+	// Start any dependent tasks that are now runnable
+	dependentNames := s.graph.GetDependents(task.Name())
+	for _, depName := range dependentNames {
+		// Get the task specification
+		spec, exists := s.graph.GetTaskSpec(depName)
+		if !exists {
+			s.logger.Error("Dependent task not found in graph", map[string]interface{}{
+				"task": depName,
+			})
+			continue
+		}
+
+		// Check if all dependencies of the dependent task are completed
+		allDepsCompleted := true
+		deps := s.graph.GetDependencies(depName)
+		for _, dep := range deps {
+			s.mu.RLock()
+			status, exists := s.status[dep]
+			s.mu.RUnlock()
+			if !exists || status.Error != nil {
+				allDepsCompleted = false
+				break
+			}
+		}
+		if allDepsCompleted {
+			s.wg.Add(1)
+			go s.executeTask(NewTask(spec))
+		}
 	}
 }
 
