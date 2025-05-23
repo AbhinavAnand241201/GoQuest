@@ -83,47 +83,107 @@ func (t *task) GetDependencies() []string {
 func (t *task) Run(ctx context.Context) (TaskResult, error) {
 	start := time.Now()
 	
-	// Create a channel to signal task completion
-	done := make(chan struct{})
+	// Create a channel to signal task completion with a buffer to prevent goroutine leaks
+	done := make(chan struct{}, 1)
 	
-	// Create channels for result and error
+	// Create channels for result and error with buffers to prevent deadlocks
 	resultCh := make(chan interface{}, 1)
 	errCh := make(chan error, 1)
 	
+	// Create a context that can be cancelled
+	taskCtx, cancel := context.WithCancel(ctx)
+	defer cancel() // Ensure resources are cleaned up
+	
 	// Execute the task in a goroutine
 	go func() {
-		defer close(done)
+		defer func() {
+			close(done)
+		}()
 		
 		// Check if we have a Run function (backward compatibility)
 		if t.spec.Run != nil {
 			// Execute the Run function
-			result, err := t.spec.Run(ctx)
-			resultCh <- result
-			errCh <- err
+			result, err := t.spec.Run(taskCtx)
+			select {
+			case resultCh <- result:
+				// Successfully sent result
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
+			
+			select {
+			case errCh <- err:
+				// Successfully sent error
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
 		} else if t.spec.Command != "" {
 			// Execute the command
-			result, err := executeCommand(ctx, t.spec)
-			resultCh <- result
-			errCh <- err
+			result, err := executeCommand(taskCtx, t.spec)
+			select {
+			case resultCh <- result:
+				// Successfully sent result
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
+			
+			select {
+			case errCh <- err:
+				// Successfully sent error
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
 		} else {
 			// Default implementation for tasks without commands
 			result := fmt.Sprintf("Task %s completed", t.spec.Name)
-			resultCh <- result
-			errCh <- nil
+			select {
+			case resultCh <- result:
+				// Successfully sent result
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
+			
+			select {
+			case errCh <- nil:
+				// Successfully sent error
+			default:
+				// Channel full or closed, which shouldn't happen with buffered channels
+			}
 		}
 	}()
 	
-	// Wait for task completion or context cancellation
+	// Wait for task completion or context cancellation with a timeout
 	select {
 	case <-done:
 		// Task completed normally
 		duration := time.Since(start)
+		
+		// Get result and error with a timeout to prevent deadlocks
+		var result interface{}
+		var err error
+		
+		select {
+		case result = <-resultCh:
+			// Got result
+		case <-time.After(10 * time.Millisecond):
+			// Timed out waiting for result
+			result = nil
+		}
+		
+		select {
+		case err = <-errCh:
+			// Got error
+		case <-time.After(10 * time.Millisecond):
+			// Timed out waiting for error
+			err = fmt.Errorf("timed out waiting for task result")
+		}
+		
 		return TaskResult{
 			Name:     t.spec.Name,
-			Result:   <-resultCh,
+			Result:   result,
 			Duration: duration,
-			Error:    <-errCh,
-		}, <-errCh
+			Error:    err,
+		}, err
 		
 	case <-ctx.Done():
 		// Context was cancelled or timed out
