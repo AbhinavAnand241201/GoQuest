@@ -1,7 +1,1 @@
----
-description: 
-globs: 
-alwaysApply: false
----
-Rule Name: rule1
-Description: whenever u r debugging and trying to run the tests and make the code pass the test , u need to re run the test , debug , re run , debug , re run , debug until the tests paas , and until the code is clean and functional and passsing all the tests ...dont stop until then rule no 1: whenever u r debugging and trying to run the tests and make the code pass the test , u need to re run the test , debug , re run , debug , re run , debug until the tests paas , and until the code is clean and functional and passsing all the tests ...dont stop until then 
+
