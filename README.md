@@ -443,26 +443,8 @@ Here are some practical use cases for the task scheduler:
 4. **Batch Processing**: Process a large number of items in parallel with controlled concurrency.
 5. **Dependency Management**: Manage complex dependencies between tasks in any system.
 
-## Development Details
-GoQuest is developed in five parts to ensure a structured, incremental approach. As of Part 2, the following are complete:
 
-### Part 1: Project Setup, Task Definition, and Basic CLI
-- Initialized Go module and Git repository.
-- Defined `TaskSpec` (name, run function, dependencies) and `TaskRunner` interface.
-- Created a basic CLI to run a single task sequentially.
-- Set up thread-safe logging and error handling in `internal/util`.
 
-### Part 2: Adding Concurrency with Goroutines and Channels
-- Extended task registry to support multiple tasks with validation.
-- Implemented a concurrent `Executor` with a worker pool using goroutines and channels.
-- Added thread-safe result collection and error aggregation.
-- Updated CLI to run multiple tasks with `--concurrency` and `--verbose` flags.
-- Added tests for concurrent execution and logging.
-
-### Upcoming Parts
-- **Part 3**: Implement a DSL parser to dynamically load tasks from Go scripts.
-- **Part 4**: Add task dependency management for ordered execution.
-- **Part 5**: Introduce advanced features like JSON output, built-in task types (e.g., HTTP, file operations), and performance optimizations.
 
 ### Key Go Features Used
 - **Goroutines and Channels**: For concurrent task execution and result collection.
