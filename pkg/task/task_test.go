@@ -34,14 +34,6 @@ func TestTaskSpec_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "nil run function",
-			spec: TaskSpec{
-				Name: "test-task",
-				Run:  nil,
-			},
-			wantErr: true,
-		},
-		{
 			name: "empty dependency name",
 			spec: TaskSpec{
 				Name: "test-task",

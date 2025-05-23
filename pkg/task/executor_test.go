@@ -8,12 +8,9 @@ import (
 )
 
 func TestExecutor_Run(t *testing.T) {
-	// Skip this test for now as it's causing timeouts
-	t.Skip("Skipping test that causes timeouts")
-
 	tests := []struct {
 		name         string
-		tasks        []TaskRunner
+		tasks        []TaskSpec
 		concurrency  int
 		timeout      time.Duration
 		wantResults  int
@@ -22,59 +19,59 @@ func TestExecutor_Run(t *testing.T) {
 	}{
 		{
 			name: "single task success",
-			tasks: []TaskRunner{
-				NewTask(TaskSpec{
+			tasks: []TaskSpec{
+				{
 					Name: "task1",
 					Run: func(ctx context.Context) (interface{}, error) {
 						return "success", nil
 					},
-				}),
+				},
 			},
 			concurrency:  1,
-			timeout:      100 * time.Millisecond, // Shorter timeout
+			timeout:      100 * time.Millisecond,
 			wantResults:  1,
 			wantErrors:   false,
 			wantDuration: 50 * time.Millisecond,
 		},
 		{
 			name: "multiple tasks with errors",
-			tasks: []TaskRunner{
-				NewTask(TaskSpec{
+			tasks: []TaskSpec{
+				{
 					Name: "task1",
 					Run: func(ctx context.Context) (interface{}, error) {
 						return "success", nil
 					},
-				}),
-				NewTask(TaskSpec{
+				},
+				{
 					Name: "task2",
 					Run: func(ctx context.Context) (interface{}, error) {
 						return nil, errors.New("task failed")
 					},
-				}),
+				},
 			},
 			concurrency:  2,
-			timeout:      100 * time.Millisecond, // Shorter timeout
+			timeout:      100 * time.Millisecond,
 			wantResults:  2,
 			wantErrors:   true,
 			wantDuration: 50 * time.Millisecond,
 		},
 		{
 			name: "task timeout",
-			tasks: []TaskRunner{
-				NewTask(TaskSpec{
+			tasks: []TaskSpec{
+				{
 					Name: "task1",
 					Run: func(ctx context.Context) (interface{}, error) {
 						select {
 						case <-ctx.Done():
 							return nil, ctx.Err()
-						case <-time.After(200 * time.Millisecond): // Shorter wait time
+						case <-time.After(200 * time.Millisecond):
 							return "success", nil
 						}
 					},
-				}),
+				},
 			},
 			concurrency:  1,
-			timeout:      100 * time.Millisecond, // Shorter timeout
+			timeout:      100 * time.Millisecond,
 			wantResults:  1,
 			wantErrors:   true,
 			wantDuration: 100 * time.Millisecond,
@@ -90,7 +87,14 @@ func TestExecutor_Run(t *testing.T) {
 			ctx, cancel := context.WithTimeout(testCtx, tt.timeout)
 			defer cancel()
 
-			executor := NewExecutor(tt.tasks, tt.concurrency)
+			// Create executor and add tasks
+			executor := NewExecutor()
+			executor.SetConcurrency(tt.concurrency)
+			
+			// Add tasks to the executor
+			for _, taskSpec := range tt.tasks {
+				executor.AddTask(NewTask(taskSpec))
+			}
 			
 			// Use a channel to collect results asynchronously
 			resultsCh := make(chan []TaskResult, 1)

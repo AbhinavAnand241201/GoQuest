@@ -121,8 +121,12 @@ func (s *Scheduler) startExecution(ctx context.Context) error {
 		return fmt.Errorf("invalid task graph: %w", err)
 	}
 
-	// Start monitoring goroutine
-	go s.monitor()
+	// Start monitoring goroutine with the same context
+	monitorDone := make(chan struct{})
+	go func() {
+		s.monitor(ctx)
+		close(monitorDone)
+	}()
 
 	// Get initial runnable tasks
 	runnable := s.graph.GetRunnableTasks()
@@ -143,21 +147,32 @@ func (s *Scheduler) startExecution(ctx context.Context) error {
 		close(done)
 	}()
 
+	// Create a channel for errors
+	errCh := make(chan error, 1)
+
+	// Wait for completion or cancellation
 	select {
 	case <-done:
 		// All tasks completed
+		// Check for errors
+		select {
+		case err := <-s.errors:
+			errCh <- err
+		default:
+			errCh <- nil
+		}
 	case <-ctx.Done():
 		// Context cancelled
-		return ctx.Err()
+		errCh <- ctx.Err()
+		// Cancel our own context to stop all tasks
+		s.cancelFunc()
 	}
 
-	// Check for errors
-	select {
-	case err := <-s.errors:
-		return err
-	default:
-		return nil
-	}
+	// Wait for the monitor to finish
+	<-monitorDone
+
+	// Return any error
+	return <-errCh
 }
 
 // executeTask executes a single task
@@ -339,12 +354,14 @@ func (s *Scheduler) executeTask(task Task) {
 }
 
 // monitor handles task completion and error notifications
-func (s *Scheduler) monitor() {
+func (s *Scheduler) monitor(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-s.ctx.Done():
 			return
 		case <-s.cancel:
